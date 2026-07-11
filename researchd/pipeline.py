@@ -14,7 +14,7 @@ from pathlib import Path
 import requests
 
 from .adapters import get_adapter
-from .llm import LLMError, LMStudioClient, MockLLM
+from .llm import LLMError, make_llm
 from .missions import Mission
 from .state import State
 from .util import today_str
@@ -194,7 +194,7 @@ def run_night(cfg: dict, mission: Mission, dry_run: bool,
     questions_done = sources_ingested = 0
     status = 'ok'
 
-    llm = MockLLM() if dry_run else LMStudioClient(cfg['llm'])
+    llm = make_llm(cfg, dry_run)
     try:
         model = llm.preflight()
     except Exception as e:

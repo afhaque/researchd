@@ -11,6 +11,11 @@ owns the loop and the model is called only for small, bounded jobs — the desig
 that keeps a modest local model reliable over long unattended runs (see
 [How it works](#how-it-works)).
 
+The model backend is swappable: run against the **Anthropic cloud** now (the
+default — a cheap model grades sources, a strong one writes pages) and switch to
+a **local model** later by editing one line in `config.yaml`. See
+[Choosing a model backend](#choosing-a-model-backend).
+
 ---
 
 ## What it does
@@ -55,15 +60,42 @@ Python packages — it's the fastest way to see the shape of the output.
 
 ---
 
-## Setup for real runs (on the GPU box)
+## Choosing a model backend
 
-1. **LM Studio** — load your model (e.g. Qwen3-32B or Llama-3.3-70B at Q4),
-   then start the local server (Developer tab → *Start Server*, or
-   `lms server start` headless). The default endpoint
-   `http://localhost:1234/v1` is already in `config.yaml`. Set `llm.model` to
-   the model id LM Studio reports, or leave it empty to use the first loaded
-   model. Turn on JIT loading / keep-alive so the model is resident when the
-   job fires at 1 AM.
+`config.yaml` → `llm.provider` selects where the model runs. Switching is a
+one-line edit; nothing else in the pipeline changes.
+
+**Anthropic cloud (`provider: anthropic`, the default).** Runs immediately with
+just an API key — no GPU, no model download. It uses two models by cost:
+Claude Haiku 4.5 for the high-volume grading and query steps (cheap), and Claude
+Sonnet 5 for synthesis (strong). Both are set under `llm.anthropic`; change
+`default_model` to `claude-opus-4-8` if you want maximum synthesis quality, or
+point every step at one model. Set the key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Cost scales with your per-night budgets — grading is one Haiku call per source,
+synthesis one Sonnet call per page. Start with the default budgets and watch the
+first few `nightly-report.md` files before turning them up.
+
+**Local model (`provider: openai`).** Runs against any OpenAI-compatible server
+— LM Studio, Ollama, llama.cpp, vLLM. No token cost, full privacy. Set
+`provider: openai`, load a model (e.g. Qwen3-32B or Qwen3.5 at Q4) in LM Studio,
+start its server (Developer tab → *Start Server*, or `lms server start`
+headless), and turn on JIT loading / keep-alive so the model is resident when
+the job fires at 1 AM. The default endpoint `http://localhost:1234/v1` is in
+`config.yaml` under `llm.openai`; leave `model` empty to use the first loaded
+model. One loaded model serves every step (no per-step routing locally).
+
+The recommended path: prove the pipeline end-to-end on Anthropic cloud, then
+flip to local once you're happy with the plumbing.
+
+## Setup for real runs
+
+1. **Pick a backend** — see [Choosing a model backend](#choosing-a-model-backend)
+   above. Cloud needs only `ANTHROPIC_API_KEY`; local needs LM Studio running.
 2. **Keys** — `export TAVILY_API_KEY=...` for the Tavily adapter. PubMed needs
    no key at low volume.
 3. **Point the wiki at your vault** *(optional)* — by default a mission writes
@@ -250,9 +282,10 @@ unchanged.
 
 - **Dependencies:** `pyyaml` and `requests`. No LangChain, no framework, no
   server. The whole thing is a small readable Python package.
-- **LLM API:** any OpenAI-compatible `/v1/chat/completions` endpoint. LM Studio
-  is the reference, but Ollama, llama.cpp's server, or vLLM work by changing
-  `llm.base_url`.
+- **LLM API:** two backends behind one interface — the Anthropic Messages API
+  (called directly over HTTPS, no SDK) and any OpenAI-compatible
+  `/v1/chat/completions` endpoint (LM Studio, Ollama, llama.cpp, vLLM). Switch
+  with `llm.provider`.
 - **Reliability guards baked in:** bounded token/timeout on every call,
   defensive JSON parsing with one retry and a fallback, quote-verification
   against source text, atomic file writes, cross-night dedup, a run lockfile,

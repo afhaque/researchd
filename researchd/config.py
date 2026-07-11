@@ -8,11 +8,24 @@ ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
     'llm': {
-        'base_url': 'http://localhost:1234/v1',
-        'model': '',  # empty = first model LM Studio reports
+        'provider': 'anthropic',   # 'anthropic' (cloud) or 'openai' (local)
         'max_tokens': 2048,
         'timeout_seconds': 180,
-        'temperature': 0.3,
+        'temperature': 0.3,        # local/openai only; Anthropic omits it
+        'anthropic': {
+            'default_model': 'claude-sonnet-5',   # strong model: synthesis
+            'api_key_env': 'ANTHROPIC_API_KEY',
+            'step_models': {                       # cheap model: high-volume steps
+                'queries': 'claude-haiku-4-5',
+                'grade': 'claude-haiku-4-5',
+                'frontier': 'claude-haiku-4-5',
+                # 'synthesize' falls through to default_model
+            },
+        },
+        'openai': {
+            'base_url': 'http://localhost:1234/v1',  # LM Studio default
+            'model': '',  # empty = first model the server reports
+        },
     },
     'missions_dir': 'missions',
     'state_db': 'state/researchd.db',

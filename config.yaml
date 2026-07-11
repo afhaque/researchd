@@ -1,10 +1,29 @@
 # researchd global config — machine-specific settings live here.
+
 llm:
-  base_url: http://localhost:1234/v1   # LM Studio default
-  model: ""                            # empty = first loaded model
+  # Which backend to use. Switch to 'openai' to run against a local model
+  # (LM Studio, Ollama, llama.cpp, vLLM) instead of the Anthropic cloud.
+  provider: anthropic
   max_tokens: 2048
   timeout_seconds: 180
-  temperature: 0.3
+  temperature: 0.3            # local/openai only; ignored by Anthropic
+
+  # Cloud provider. Cheap model grades/queries in high volume; strong model
+  # synthesizes the wiki pages. Set ANTHROPIC_API_KEY in the environment.
+  anthropic:
+    default_model: claude-sonnet-5      # synthesis (strong)
+    api_key_env: ANTHROPIC_API_KEY
+    step_models:
+      queries: claude-haiku-4-5         # cheap
+      grade: claude-haiku-4-5           # cheap, highest volume
+      frontier: claude-haiku-4-5        # cheap
+      # synthesize falls through to default_model
+
+  # Local provider (only used when provider: openai). One loaded model serves
+  # every step, so no per-step routing here.
+  openai:
+    base_url: http://localhost:1234/v1  # LM Studio default
+    model: ""                           # empty = first model the server reports
 
 missions_dir: missions
 state_db: state/researchd.db
