@@ -1,0 +1,16 @@
+# researchd global config — machine-specific settings live here.
+llm:
+  base_url: http://localhost:1234/v1   # LM Studio default
+  model: ""                            # empty = first loaded model
+  max_tokens: 2048
+  timeout_seconds: 180
+  temperature: 0.3
+
+missions_dir: missions
+state_db: state/researchd.db
+
+defaults:
+  max_questions_per_night: 3
+  max_sources_per_question: 5
+  max_queries_per_question: 3
+  max_new_frontier_items: 5

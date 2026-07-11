@@ -1,0 +1,10 @@
+# Nightly research window: launch at 1:00 AM, hard-stop by ~7:45 AM.
+# The --max-minutes budget is the real deadline; the process exits gracefully
+# (frontier + report written) when it's reached. Lockfile prevents overlap.
+#
+# crontab -e on the GPU box (Linux/macOS):
+0 1 * * * cd /path/to/ResearchWeb && /usr/bin/python3 -m researchd run --max-minutes 405 >> state/cron.log 2>&1
+
+# Windows (Task Scheduler): create a nightly 1:00 AM task running
+#   python -m researchd run --max-minutes 405
+# with "Start in" set to the ResearchWeb directory.

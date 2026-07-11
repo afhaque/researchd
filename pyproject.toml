@@ -1,0 +1,12 @@
+[project]
+name = "researchd"
+version = "0.1.0"
+description = "Nightly local-LLM research agent that maintains an Obsidian wiki"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[tool.setuptools]
+packages = ["researchd", "researchd.adapters"]

@@ -1,0 +1,21 @@
+# systemd alternative (Linux GPU box). Install both files, then:
+#   systemctl --user enable --now researchd.timer
+#
+# ---- ~/.config/systemd/user/researchd.service ----
+[Unit]
+Description=researchd nightly research run
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/ResearchWeb
+ExecStart=/usr/bin/python3 -m researchd run --max-minutes 405
+
+# ---- ~/.config/systemd/user/researchd.timer ----
+# [Unit]
+# Description=Run researchd at 1 AM nightly
+# [Timer]
+# OnCalendar=*-*-* 01:00:00
+# Persistent=false
+# [Install]
+# WantedBy=timers.target

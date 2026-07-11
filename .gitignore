@@ -1,0 +1,19 @@
+# PAI work-tracking (not part of the project)
+MEMORY/
+
+# Local runtime state and research data
+state/
+missions/
+**/wiki-dryrun/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Secrets / env
+.env
