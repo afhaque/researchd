@@ -31,9 +31,11 @@ DEFAULTS = {
     'state_db': 'state/researchd.db',
     'defaults': {
         'max_questions_per_night': 3,
-        'max_sources_per_question': 5,
+        'max_sources_per_question': 5,    # per-question source ceiling; 0 = unlimited (deadline governs)
         'max_queries_per_question': 3,
         'max_new_frontier_items': 5,
+        'synth_batch_size': 8,            # graded sources per synthesis section (bounds each model call)
+        'sources_per_search': 10,         # results pulled per single adapter search
     },
 }
 

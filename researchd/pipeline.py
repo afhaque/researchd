@@ -18,9 +18,12 @@ from .llm import LLMError, make_llm
 from .missions import Mission
 from .state import State
 from .util import today_str
-from .wiki import append_log, rebuild_index, save_raw, write_page, write_report
+from .wiki import (append_log, append_section, init_page, rebuild_index,
+                   save_raw, write_report)
 
 SOURCE_CHAR_BUDGET = 6000  # truncate source content before grading
+SYNTH_BATCH_DEFAULT = 8    # graded sources per synthesis call (bounded context)
+SEARCH_PAGE_DEFAULT = 10   # results to pull per single adapter search
 
 QUERY_PROMPT = """You are a research assistant. Generate {n} distinct web/database \
 search queries to investigate this question. Avoid these already-used queries: {past}
@@ -43,10 +46,13 @@ Reply with ONLY a JSON object:
 "key_claims": ["claim", "..."], "quote": "one short verbatim sentence copied \
 exactly from the source text that supports relevance"}}"""
 
-SYNTH_PROMPT = """Write the body of a wiki page answering this research question \
-from tonight's graded findings. Follow the schema conventions below. Reference \
-sources ONLY as [S1], [S2] etc — never write URLs. Use [[wikilinks]] for related \
-concepts. Be factual; only state what the findings support.
+SYNTH_PROMPT = """Write ONE section of a wiki page answering this research \
+question, from a single batch of graded findings. The page accumulates many \
+such sections over time, so write this as a self-contained contribution — do \
+not summarize the whole question, just what THIS batch adds. Follow the schema \
+conventions below. Reference sources ONLY as [S1], [S2] etc — never write URLs. \
+Use [[wikilinks]] for related concepts. Be factual; only state what the \
+findings support.
 
 Question: {question}
 
@@ -71,6 +77,19 @@ Reply with ONLY a JSON object: {{"close": [question numbers that are now \
 sufficiently answered], "add": ["new follow-up question", "..."]}}. Be \
 conservative about closing; only add questions that tonight's findings raised."""
 
+EXPAND_PROMPT = """You are helping plan a research mission BEFORE it runs. Given \
+the mission theme and its current open questions, propose {n} ADDITIONAL \
+distinct research questions that broaden and deepen coverage of the theme. Each \
+must be specific and answerable, and NOT a duplicate or near-duplicate of an \
+existing question.
+
+Mission theme: {theme}
+
+Current open questions:
+{open_questions}
+
+Reply with ONLY a JSON object: {{"add": ["question", "..."]}}"""
+
 
 class Deadline:
     def __init__(self, max_minutes: float):
@@ -93,9 +112,18 @@ def acquire_lock(state_dir: Path):
 def _process_question(item, llm, adapters, state, vault, mission, budgets,
                       deadline, schema, run_id, report_lines,
                       work_summary) -> str:
-    """Steps 1-4 for one frontier question. Returns the ingested-source count
-    on success, or 'skip' / 'deadline'. LLM/network errors propagate."""
-    # Step 1-2: generate queries (LLM), search (adapters)
+    """Harvest one frontier question by interleaving fetch → grade → append:
+    pull a batch of sources, grade each with fresh context, and once enough
+    have passed, synthesize a self-contained section and append it to the page.
+    Repeat until the deadline hits, sources run dry, or the ceiling is reached.
+
+    This keeps every model call bounded (good for a small local model) and the
+    page grows section by section instead of via one giant synthesis. The
+    deadline is checked before every fetch and every grade, so a high (or zero =
+    unlimited) source ceiling can never run away and starve the rest of the
+    night. Returns ingested-source count, or 'skip' if nothing new was written.
+    LLM/network errors propagate to run_night's consecutive-failure guard."""
+    # Step 1-2: generate queries (LLM); a 0 ceiling means "unlimited, deadline governs"
     past = state.past_queries(mission.slug, item.qid)
     q_json = llm.json(QUERY_PROMPT.format(
         n=budgets['max_queries_per_question'], past=past or 'none',
@@ -104,83 +132,117 @@ def _process_question(item, llm, adapters, state, vault, mission, budgets,
     queries = [q for q in q_json.get('queries', [])
                if isinstance(q, str)][:budgets['max_queries_per_question']]
 
-    # Fetch, deduping against prior nights as we go; stop as soon as the
-    # per-question source budget is filled (don't pay for discarded results)
-    max_sources = budgets['max_sources_per_question']
-    fresh, seen_urls = [], set()
+    ceiling = budgets['max_sources_per_question']            # 0 = unlimited
+    synth_batch = budgets.get('synth_batch_size', SYNTH_BATCH_DEFAULT)
+    page_size = budgets.get('sources_per_search', SEARCH_PAGE_DEFAULT)
+    seen_urls: set = set()
+    batch: list = []          # graded findings awaiting synthesis
+    ingested = considered = 0
+    section_no = 0
+    page_ready = False
+
+    def at_ceiling() -> bool:
+        return bool(ceiling) and ingested + len(batch) >= ceiling
+
+    def flush() -> None:
+        nonlocal batch, section_no, ingested, page_ready
+        if not batch:
+            return
+        section_no += 1
+        if not page_ready:
+            init_page(vault, item.text, run_id, item.qid, [mission.slug])
+            page_ready = True
+        findings = '\n\n'.join(
+            f'[S{n}] {src.title}\nSummary: {summary}\nClaims: {"; ".join(claims)}'
+            for n, (src, summary, claims) in enumerate(batch, start=1))
+        body = llm.text(SYNTH_PROMPT.format(
+            question=item.text, schema=schema[:2000], findings=findings),
+            step='synthesize')
+        label = f'{today_str()} · batch {section_no} · {len(batch)} sources'
+        append_section(vault, item.qid, item.text, body,
+                       [s for s, _, _ in batch], run_id, label)
+        append_log(vault, f'section | Q{item.qid} | {label}')
+        ingested += len(batch)
+        batch = []
+
     for query in queries:
-        if len(fresh) >= max_sources:
+        if deadline.reached() or at_ceiling():
             break
         state.record_query(mission.slug, item.qid, query, run_id)
         for adapter in adapters:
-            if len(fresh) >= max_sources:
+            if deadline.reached() or at_ceiling():
                 break
             try:
-                results = adapter.search(query, limit=max_sources)
+                results = adapter.search(query, limit=page_size)
             except Exception as e:
                 append_log(vault, f'adapter-error | {adapter.name} | {e}')
                 continue
-            for c in results:
-                if len(fresh) >= max_sources:
+            for src in results:
+                if deadline.reached() or at_ceiling():
                     break
-                if c.url not in seen_urls and \
-                        not state.is_seen(mission.slug, c.url):
-                    fresh.append(c)
-                    seen_urls.add(c.url)
-    if not fresh:
-        report_lines.append(f'Q{item.qid}: no new sources found')
-        return 'skip'
+                if src.url in seen_urls or state.is_seen(mission.slug, src.url):
+                    continue
+                seen_urls.add(src.url)
+                considered += 1
+                # Step 3: grade ONE source, fresh context, so it can't blend.
+                # Shape is normalized — a local model may return any fields and
+                # one malformed value must not crash the night.
+                g = llm.json(GRADE_PROMPT.format(
+                    question=item.text, title=src.title,
+                    content=src.content[:SOURCE_CHAR_BUDGET]), step='grade',
+                    fallback={'relevant': False})
+                # Mark every graded source seen — rejected ones too, or they get
+                # re-fetched and re-graded every night the question stays open
+                state.mark_seen(mission.slug, src.url, run_id)
+                quote = g.get('quote')
+                quote = quote if isinstance(quote, str) else ''
+                summary = str(g.get('summary', '')).strip() or '(no summary)'
+                claims = [str(c) for c in (g.get('key_claims') or [])
+                          if isinstance(c, (str, int, float))]
+                if g.get('relevant') and quote and \
+                        quote.lower() in src.content.lower():
+                    batch.append((src, summary, claims))
+                    save_raw(vault, src, run_id)
+                    if len(batch) >= synth_batch:
+                        flush()   # Step 4-5: synthesize a section, append it
+    flush()  # write the final partial batch
 
-    # Step 3: grade each source (one LLM call per source, truncated input).
-    # Grade JSON shape is normalized here — a local model can return any
-    # shape, and one malformed field must not crash the night.
-    graded = []
-    for src in fresh:
-        if deadline.reached():
-            return 'deadline'
-        g = llm.json(GRADE_PROMPT.format(
-            question=item.text, title=src.title,
-            content=src.content[:SOURCE_CHAR_BUDGET]), step='grade',
-            fallback={'relevant': False})
-        # Mark every graded source seen — rejected ones too, or they get
-        # re-fetched and re-graded every night the question stays open
-        state.mark_seen(mission.slug, src.url, run_id)
-        quote = g.get('quote')
-        quote = quote if isinstance(quote, str) else ''
-        summary = str(g.get('summary', '')).strip() or '(no summary)'
-        claims = [str(c) for c in (g.get('key_claims') or [])
-                  if isinstance(c, (str, int, float))]
-        if g.get('relevant') and quote and quote.lower() in src.content.lower():
-            graded.append((src, summary, claims))
-            save_raw(vault, src, run_id)
-    if not graded:
-        report_lines.append(f'Q{item.qid}: {len(fresh)} sources fetched, '
-                            'none passed grading')
+    if ingested == 0:
+        report_lines.append(
+            f'Q{item.qid}: no new sources found' if considered == 0
+            else f'Q{item.qid}: {considered} sources graded, none passed')
         return 'skip'
-    if deadline.reached():
-        return 'deadline'
-
-    # Step 4: synthesize a wiki page
-    findings = '\n\n'.join(
-        f'[S{n}] {src.title}\nSummary: {summary}\nClaims: {"; ".join(claims)}'
-        for n, (src, summary, claims) in enumerate(graded, start=1))
-    body = llm.text(SYNTH_PROMPT.format(
-        question=item.text, schema=schema[:2000], findings=findings),
-        step='synthesize')
-    page = write_page(vault, title=item.text, body=body,
-                      sources=[src for src, _, _ in graded], run_id=run_id,
-                      question_id=item.qid, tags=[mission.slug])
-    append_log(vault, f'page | Q{item.qid} | {page.name} | '
-                      f'{len(graded)} sources')
-    report_lines.append(f'Q{item.qid}: wrote {page.name} '
-                        f'from {len(graded)} sources')
+    report_lines.append(f'Q{item.qid}: wrote {section_no} section(s) '
+                        f'from {ingested} sources ({considered} graded)')
     work_summary.append(f'Q{item.qid} ({item.text}): '
-                        f'{len(graded)} sources synthesized')
-    return len(graded)
+                        f'{ingested} sources synthesized')
+    return ingested
+
+
+def expand_frontier(cfg: dict, mission: Mission, count: int) -> list[str]:
+    """Pre-planning step (run by hand before a mission): ask the LLM to propose
+    `count` new frontier questions and append them for the human to review.
+    Reuses the frontier's validate + dated-backup + atomic-write path, so the
+    model never edits the file directly. Returns the questions actually added."""
+    llm = make_llm(cfg, dry_run=False)
+    llm.preflight()
+    frontier = mission.frontier()
+    open_qs = '\n'.join(f'- {i.text}' for i in frontier.open_items()) \
+        or '(none yet)'
+    ops = llm.json(EXPAND_PROMPT.format(
+        n=count, theme=mission.name, open_questions=open_qs),
+        step='frontier', fallback={'add': []})
+    add = [a for a in (ops.get('add') or [])
+           if isinstance(a, str) and a.strip()]
+    applied = frontier.apply_ops({'close': [], 'add': add}, count)
+    if applied['added']:
+        frontier.save(mission.name)
+    added_ids = set(applied['added'])
+    return [i.text for i in frontier.items if i.qid in added_ids]
 
 
 def run_night(cfg: dict, mission: Mission, dry_run: bool,
-              max_minutes: float) -> tuple:
+              max_minutes: float, max_sources: int | None = None) -> tuple:
     run_id = f'{today_str()}-{uuid.uuid4().hex[:8]}'
     lock = acquire_lock(Path(cfg['state_dir']))  # noqa: F841
     # Dry runs are fully sandboxed: separate state DB and wiki dir, and the
@@ -188,6 +250,8 @@ def run_night(cfg: dict, mission: Mission, dry_run: bool,
     state = State(cfg['state_db'] if not dry_run
                   else str(Path(cfg['state_dir']) / 'dryrun.db'))
     budgets = mission.budgets(cfg['defaults'])
+    if max_sources is not None:  # per-run override of the ceiling (0 = unlimited)
+        budgets['max_sources_per_question'] = max_sources
     vault = mission.vault_path if not dry_run else mission.path / 'wiki-dryrun'
     deadline = Deadline(max_minutes)
     report_lines: list[str] = []

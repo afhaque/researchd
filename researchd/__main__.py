@@ -6,7 +6,7 @@ import sys
 from .config import load_config
 from .missions import (Mission, create_mission, get_active, list_missions,
                        missions_root, set_active)
-from .pipeline import run_night
+from .pipeline import expand_frontier, run_night
 
 
 def cmd_mission_new(cfg, args):
@@ -42,8 +42,24 @@ def cmd_run(cfg, args):
         sys.exit('no active mission; use: python -m researchd mission use <slug>')
     mission = Mission(missions_root(cfg) / slug)
     run_id, report = run_night(cfg, mission, dry_run=args.dry_run,
-                               max_minutes=args.max_minutes)
+                               max_minutes=args.max_minutes,
+                               max_sources=args.max_sources)
     print(f'run {run_id} complete — see {report}')
+
+
+def cmd_frontier_expand(cfg, args):
+    slug = args.mission or get_active(cfg)
+    if not slug:
+        sys.exit('no active mission; use: python -m researchd mission use <slug>')
+    mission = Mission(missions_root(cfg) / slug)
+    added = expand_frontier(cfg, mission, args.count)
+    if not added:
+        print('no new questions proposed')
+        return
+    print(f'added {len(added)} question(s) to {mission.path / "frontier.md"} '
+          '— review and prune before running:')
+    for text in added:
+        print(f'  + {text}')
 
 
 def main():
@@ -68,6 +84,17 @@ def main():
                        help='mock LLM + mock search; no GPU or keys needed')
     p_run.add_argument('--max-minutes', type=float, default=360,
                        help='wall-clock budget (default 360)')
+    p_run.add_argument('--max-sources', type=int, default=None,
+                       help='override per-question source ceiling for this run '
+                            '(0 = unlimited; deadline governs)')
+
+    p_frontier = sub.add_parser('frontier', help='pre-plan the frontier')
+    fsub = p_frontier.add_subparsers(dest='fcmd', required=True)
+    p_expand = fsub.add_parser(
+        'expand', help='LLM-propose N new questions and append them for review')
+    p_expand.add_argument('--count', type=int, default=10,
+                          help='how many new questions to propose (default 10)')
+    p_expand.add_argument('--mission', help='mission slug (default: active)')
 
     args = parser.parse_args()
     cfg = load_config()
@@ -76,6 +103,8 @@ def main():
          'use': cmd_mission_use}[args.mcmd](cfg, args)
     elif args.cmd == 'run':
         cmd_run(cfg, args)
+    elif args.cmd == 'frontier':
+        {'expand': cmd_frontier_expand}[args.fcmd](cfg, args)
 
 
 if __name__ == '__main__':

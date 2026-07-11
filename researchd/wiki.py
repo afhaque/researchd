@@ -49,6 +49,50 @@ def write_page(vault: Path, title: str, body: str, sources: list,
     return path
 
 
+def page_path(vault: Path, question_id: int, title: str) -> Path:
+    # qN- prefix keeps two questions with colliding 64-char slugs distinct
+    return vault / f'q{question_id}-{slugify(title)}.md'
+
+
+def init_page(vault: Path, title: str, run_id: str, question_id: int,
+              tags: list[str]) -> Path:
+    """Create the page shell (frontmatter + title) once. Idempotent: if the
+    page already exists (an earlier batch tonight, or a prior night), leave it
+    untouched so appended sections accumulate instead of overwriting."""
+    path = page_path(vault, question_id, title)
+    if path.exists():
+        return path
+    fm = frontmatter({
+        'title': title,
+        'date': now_iso(),
+        'run_id': run_id,
+        'question_id': question_id,
+        'tags': tags,
+    })
+    atomic_write(path, f'{fm}\n\n# {title}\n')
+    return path
+
+
+def append_section(vault: Path, question_id: int, title: str, body: str,
+                   sources: list, run_id: str, label: str) -> Path:
+    """Append one self-contained section: a synthesized body citing only this
+    batch's sources as [S1..Sn], then that batch's source list. Never rewrites
+    earlier sections, so the model can't corrupt what it already wrote. Plain
+    append (like append_log) — sections are small and bounded, kept O(1)."""
+    path = page_path(vault, question_id, title)
+    allowed = {s.url for s in sources}
+    body = URL_RE.sub(lambda m: m.group(0) if m.group(0).rstrip('.,)')
+                      in allowed else '[link removed — not in sources]', body)
+    source_lines = '\n'.join(
+        f'- [S{n}] [{s.title}]({s.url}) ({s.source_type}, accessed {today_str()})'
+        for n, s in enumerate(sources, start=1))
+    section = (f'\n## {label}\n\n{body.strip()}\n\n'
+               f'### Sources\n\n{source_lines}\n')
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(section)
+    return path
+
+
 def save_raw(vault: Path, source, run_id: str) -> None:
     raw_dir = vault / 'raw'
     # crc-of-URL suffix: stable per source, distinct for colliding titles
